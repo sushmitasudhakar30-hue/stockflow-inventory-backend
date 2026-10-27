@@ -1,9 +1,12 @@
 import { Router } from 'express';
 import { stockIn, stockOut, transferStock, reportDamaged, getMovements } from '../controllers/movementController.js';
+import { authenticate, requireRole } from '../middleware/auth.js';
 const router = Router();
+const handlers = requireRole('Admin', 'Warehouse Manager', 'Inventory Staff');
+router.use(authenticate);
 router.get('/', getMovements);
-router.post('/stock-in', stockIn);
-router.post('/stock-out', stockOut);
-router.post('/transfer', transferStock);
-router.post('/damaged', reportDamaged);
+router.post('/stock-in', handlers, stockIn);
+router.post('/stock-out', handlers, stockOut);
+router.post('/transfer', handlers, transferStock);
+router.post('/damaged', handlers, reportDamaged);
 export default router;

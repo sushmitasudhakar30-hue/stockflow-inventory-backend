@@ -1,0 +1,10 @@
+import { Router } from 'express';
+import { getSuppliers, createSupplier, updateSupplier, deleteSupplier } from '../controllers/supplierController.js';
+import { authenticate, requireRole } from '../middleware/auth.js';
+const router = Router();
+router.use(authenticate);
+router.get('/', requireRole('Admin', 'Warehouse Manager', 'Sales Staff'), getSuppliers);
+router.post('/', requireRole('Admin', 'Warehouse Manager'), createSupplier);
+router.put('/:id', requireRole('Admin', 'Warehouse Manager'), updateSupplier);
+router.delete('/:id', requireRole('Admin', 'Warehouse Manager'), deleteSupplier);
+export default router;

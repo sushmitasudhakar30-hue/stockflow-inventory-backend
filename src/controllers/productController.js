@@ -60,7 +60,9 @@ export async function updateProduct(req, res) {
     const updates = Object.fromEntries(Object.entries(req.body).filter(([key]) => allowed.includes(key)));
     const product = await Product.findByIdAndUpdate(req.params.id, updates, { new: true, runValidators: true }).lean();
     if (!product) return res.status(404).json({ message: 'Product not found' });
-    res.json({ ...product, id: product._id });
+    const stocks = await Stock.find({ product: product._id }).lean();
+    const warehouseStock = Object.fromEntries(stocks.map((s) => [String(s.warehouse), s.quantity]));
+    res.json({ ...product, id: product._id, warehouseStock });
   } catch (error) {
     if (error.code === 11000) return res.status(409).json({ message: 'SKU already exists' });
     res.status(400).json({ message: error.message });

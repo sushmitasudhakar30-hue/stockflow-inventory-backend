@@ -1,165 +1,100 @@
-import mongoose from 'mongoose';
-import Product from '../models/Product.js';
-import Warehouse from '../models/Warehouse.js';
-import Stock from '../models/Stock.js';
 import Movement from '../models/Movement.js';
+import { asyncHandler, HttpError } from '../utils/errors.js';
+import { movementDTO, stockRow } from '../utils/serializers.js';
+import { addStock, removeStock, recordMovements, validQty, ensureIds } from '../services/stockService.js';
 
-class StockError extends Error {}
-
-// Atomically adds stock. Upsert is safe because of the unique (product, warehouse) index;
-// if two requests race to create the row, the loser retries as a plain increment.
-async function addStock(productId, warehouseId, qty) {
-  const filter = { product: productId, warehouse: warehouseId };
-  const update = { $inc: { quantity: qty } };
-  try {
-    return await Stock.findOneAndUpdate(filter, update, { upsert: true, new: true, setDefaultsOnInsert: true });
-  } catch (error) {
-    if (error.code === 11000) return Stock.findOneAndUpdate(filter, update, { new: true });
-    throw error;
-  }
+function checkQty(qty) {
+  if (!validQty(qty)) throw new HttpError(400, 'Quantity must be a positive integer');
 }
 
-// Atomically removes stock. The quantity check and the decrement happen in ONE database
-// operation, so concurrent requests can never push the quantity below zero.
-async function removeStock(productId, warehouseId, qty) {
-  const updated = await Stock.findOneAndUpdate(
-    { product: productId, warehouse: warehouseId, quantity: { $gte: qty } },
-    { $inc: { quantity: -qty } },
-    { new: true }
+// Every stock call answers { movement, stock: [{ productId, warehouseId, quantity }] } with the NEW quantities.
+const respond = (res, movement, ...stockDocs) =>
+  res.status(201).json({ movement: movementDTO(movement), stock: stockDocs.map(stockRow) });
+
+export const stockIn = asyncHandler(async (req, res) => {
+  const { productId, warehouseId, qty, note = '' } = req.body;
+  checkQty(qty);
+  await ensureIds(productId, [warehouseId]);
+  const stock = await addStock(productId, warehouseId, qty);
+  const [movement] = await recordMovements(
+    [{ type: 'Stock In', product: productId, warehouse: warehouseId, qty, user: req.user.name, note }],
+    () => removeStock(productId, warehouseId, qty)
   );
-  if (!updated) {
-    const current = await Stock.findOne({ product: productId, warehouse: warehouseId });
-    throw new StockError(`Insufficient stock. Available: ${current?.quantity || 0}`);
-  }
-  return updated;
-}
+  respond(res, movement, stock);
+});
 
-// Records the movement; if that fails, runs `undo` so stock and history never disagree.
-async function recordMovement(data, undo) {
+export const stockOut = asyncHandler(async (req, res) => {
+  const { productId, warehouseId, qty, note = '' } = req.body;
+  checkQty(qty);
+  await ensureIds(productId, [warehouseId]);
+  const stock = await removeStock(productId, warehouseId, qty);
+  const [movement] = await recordMovements(
+    [{ type: 'Stock Out', product: productId, warehouse: warehouseId, qty, user: req.user.name, note }],
+    () => addStock(productId, warehouseId, qty)
+  );
+  respond(res, movement, stock);
+});
+
+export const transferStock = asyncHandler(async (req, res) => {
+  const { productId, fromWarehouseId, toWarehouseId, qty, note = '' } = req.body;
+  if (fromWarehouseId === toWarehouseId) {
+    throw new HttpError(400, 'Source and destination warehouses must be different');
+  }
+  checkQty(qty);
+  await ensureIds(productId, [fromWarehouseId, toWarehouseId]);
+
+  // Debit source first (fails cleanly if insufficient). If the credit fails, refund the source.
+  const from = await removeStock(productId, fromWarehouseId, qty);
+  let to;
   try {
-    return await Movement.create(data);
+    to = await addStock(productId, toWarehouseId, qty);
   } catch (error) {
-    await undo().catch((e) => console.error('Rollback failed, manual stock check needed:', e));
+    await addStock(productId, fromWarehouseId, qty);
     throw error;
   }
-}
-
-function validQty(qty) {
-  return Number.isInteger(qty) && qty > 0;
-}
-
-async function ensureIds(productId, warehouseIds) {
-  if (!mongoose.isValidObjectId(productId)) throw new Error('Invalid product id');
-  if (!(await Product.exists({ _id: productId }))) throw new Error('Product not found');
-  for (const id of warehouseIds) {
-    if (!mongoose.isValidObjectId(id) || !(await Warehouse.exists({ _id: id }))) throw new Error('Warehouse not found');
-  }
-}
-
-export async function stockIn(req, res) {
-  try {
-    const { productId, warehouseId, qty, user = '', note = '' } = req.body;
-    if (!validQty(qty)) return res.status(400).json({ message: 'Quantity must be a positive integer' });
-    await ensureIds(productId, [warehouseId]);
-    await addStock(productId, warehouseId, qty);
-    const movement = await recordMovement(
-      { type: 'Stock In', product: productId, warehouse: warehouseId, qty, user, note },
-      () => removeStock(productId, warehouseId, qty)
-    );
-    res.status(201).json(movement);
-  } catch (error) {
-    res.status(400).json({ message: error.message });
-  }
-}
-
-export async function stockOut(req, res) {
-  try {
-    const { productId, warehouseId, qty, user = '', note = '' } = req.body;
-    if (!validQty(qty)) return res.status(400).json({ message: 'Quantity must be a positive integer' });
-    await ensureIds(productId, [warehouseId]);
-    await removeStock(productId, warehouseId, qty);
-    const movement = await recordMovement(
-      { type: 'Stock Out', product: productId, warehouse: warehouseId, qty, user, note },
-      () => addStock(productId, warehouseId, qty)
-    );
-    res.status(201).json(movement);
-  } catch (error) {
-    res.status(400).json({ message: error.message });
-  }
-}
-
-export async function transferStock(req, res) {
-  try {
-    const { productId, fromWarehouseId, toWarehouseId, qty, user = '', note = '' } = req.body;
-    if (fromWarehouseId === toWarehouseId)
-      return res.status(400).json({ message: 'Source and destination warehouses must be different' });
-    if (!validQty(qty)) return res.status(400).json({ message: 'Quantity must be a positive integer' });
-    await ensureIds(productId, [fromWarehouseId, toWarehouseId]);
-
-    // Debit source first (fails cleanly if insufficient). If the credit fails, refund the source.
-    await removeStock(productId, fromWarehouseId, qty);
-    try {
-      await addStock(productId, toWarehouseId, qty);
-    } catch (error) {
-      await addStock(productId, fromWarehouseId, qty);
-      throw error;
-    }
-    const movement = await recordMovement(
+  const [movement] = await recordMovements(
+    [
       {
         type: 'Transfer',
         product: productId,
         fromWarehouse: fromWarehouseId,
         toWarehouse: toWarehouseId,
         qty,
-        user,
+        user: req.user.name,
         note,
       },
-      async () => {
-        await removeStock(productId, toWarehouseId, qty);
-        await addStock(productId, fromWarehouseId, qty);
-      }
-    );
-    res.status(201).json(movement);
-  } catch (error) {
-    res.status(400).json({ message: error.message });
-  }
-}
+    ],
+    async () => {
+      await removeStock(productId, toWarehouseId, qty);
+      await addStock(productId, fromWarehouseId, qty);
+    }
+  );
+  respond(res, movement, from, to);
+});
 
-export async function reportDamaged(req, res) {
-  try {
-    const { productId, warehouseId, qty, reason = '', user = '' } = req.body;
-    if (!validQty(qty)) return res.status(400).json({ message: 'Quantity must be a positive integer' });
-    await ensureIds(productId, [warehouseId]);
-    await removeStock(productId, warehouseId, qty);
-    const movement = await recordMovement(
-      { type: 'Damaged', product: productId, warehouse: warehouseId, qty, user, note: reason },
-      () => addStock(productId, warehouseId, qty)
-    );
-    res.status(201).json(movement);
-  } catch (error) {
-    res.status(400).json({ message: error.message });
-  }
-}
+export const reportDamaged = asyncHandler(async (req, res) => {
+  const { productId, warehouseId, qty, reason = '' } = req.body;
+  checkQty(qty);
+  await ensureIds(productId, [warehouseId]);
+  const stock = await removeStock(productId, warehouseId, qty);
+  const [movement] = await recordMovements(
+    [{ type: 'Damaged', product: productId, warehouse: warehouseId, qty, user: req.user.name, note: reason }],
+    () => addStock(productId, warehouseId, qty)
+  );
+  respond(res, movement, stock);
+});
 
-export async function getMovements(req, res) {
-  try {
-    const filter = {};
-    if (req.query.type) filter.type = req.query.type;
-    if (req.query.productId) filter.product = req.query.productId;
-    if (req.query.warehouseId)
-      filter.$or = [
-        { warehouse: req.query.warehouseId },
-        { fromWarehouse: req.query.warehouseId },
-        { toWarehouse: req.query.warehouseId },
-      ];
-    const movements = await Movement.find(filter)
-      .populate('product', 'sku name')
-      .populate('warehouse', 'name')
-      .populate('fromWarehouse', 'name')
-      .populate('toWarehouse', 'name')
-      .sort({ createdAt: -1 });
-    res.json(movements);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
+export const getMovements = asyncHandler(async (req, res) => {
+  const filter = {};
+  if (req.query.type) filter.type = req.query.type;
+  if (req.query.productId) filter.product = req.query.productId;
+  if (req.query.warehouseId) {
+    filter.$or = [
+      { warehouse: req.query.warehouseId },
+      { fromWarehouse: req.query.warehouseId },
+      { toWarehouse: req.query.warehouseId },
+    ];
   }
-}
+  const movements = await Movement.find(filter).sort({ createdAt: -1 });
+  res.json(movements.map(movementDTO));
+});

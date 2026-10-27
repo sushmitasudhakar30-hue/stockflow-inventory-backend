@@ -1,0 +1,10 @@
+import { Router } from 'express';
+import { getUsers, createUser, updateUser, toggleActive } from '../controllers/userController.js';
+import { authenticate, requireRole } from '../middleware/auth.js';
+const router = Router();
+router.use(authenticate, requireRole('Admin'));
+router.get('/', getUsers);
+router.post('/', createUser);
+router.put('/:id', updateUser);
+router.patch('/:id/toggle-active', toggleActive);
+export default router;
