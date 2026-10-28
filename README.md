@@ -13,54 +13,39 @@ Node.js + Express + MongoDB/Mongoose backend for the Product & Inventory module.
 Default API: http://localhost:5000
 Health check: GET /api/health
 
+## Setup for the full app
+
+1. `cp .env.example .env`, then set `MONGO_URI` and a long random `JWT_SECRET`.
+2. `npm install`
+3. `npm run seed` — creates demo users, products, warehouses, suppliers and orders (wipes the database; refuses to run in production without `--force`).
+4. `npm run dev` — API on http://localhost:5000
+5. Start the [frontend](https://github.com/sushmitasudhakar30-hue/stockflow-frontend) with `VITE_API_URL=http://localhost:5000/api` and sign in with `admin@stockflow.com` / `Stockflow@123` (also `manager@`, `staff@`, `sales@stockflow.com`).
+
+`CLIENT_URL` must list the frontend's origin (comma-separate several). `npm run smoke` runs an end-to-end API check against a freshly seeded database.
+
 ## API
 
-Products
+Every route except `/api/health` and `POST /api/auth/login` needs `Authorization: Bearer <token>`.
+Roles: **A**dmin, Warehouse **M**anager, **I**nventory Staff, **S**ales Staff.
 
-- GET /api/products
-- GET /api/products/:id
-- GET /api/products/categories
-- POST /api/products
-- PUT /api/products/:id
-- DELETE /api/products/:id
+| Area            | Endpoints                                                                                   | Who      |
+| --------------- | ------------------------------------------------------------------------------------------- | -------- |
+| Auth            | `POST /auth/login`, `GET /auth/me`                                                          | everyone |
+| Users           | `GET/POST /users`, `PUT /users/:id`, `PATCH /users/:id/toggle-active`                       | A        |
+| Products        | `GET /products`, `GET /products/categories`, `GET /products/:id`                            | all      |
+|                 | `POST /products`, `PUT/DELETE /products/:id`                                                | A, M     |
+| Warehouses      | `GET /warehouses`, `GET /warehouses/:id`                                                    | all      |
+|                 | `POST /warehouses`, `POST /warehouses/:id/locations`                                        | A, M     |
+| Movements       | `GET /movements`                                                                            | all      |
+|                 | `POST /movements/stock-in`, `stock-out`, `transfer`, `damaged`                              | A, M, I  |
+| Suppliers       | `GET /suppliers`                                                                            | A, M, S  |
+|                 | `POST /suppliers`, `PUT/DELETE /suppliers/:id`                                              | A, M     |
+| Sales orders    | `GET/POST /sales-orders`, `PUT /sales-orders/:id`, `POST /:id/confirm`, `PATCH /:id/status` | A, M, S  |
+|                 | `POST /:id/cancel`, `POST /:id/return`, `DELETE /:id`                                       | A, M     |
+| Purchase orders | `GET /purchase-orders`                                                                      | A, M, S  |
+|                 | `POST /purchase-orders`, `POST /purchase-orders/:id/receive`                                | A, M     |
+| Notifications   | `GET/POST /notifications`, `PATCH /notifications/:id/read`, `PATCH /notifications/read-all` | all      |
 
-Warehouses
-
-- GET /api/warehouses
-- GET /api/warehouses/:id
-- POST /api/warehouses
-
-Inventory movements
-
-- GET /api/movements
-- POST /api/movements/stock-in
-- POST /api/movements/stock-out
-- POST /api/movements/transfer
-- POST /api/movements/damaged
-
-Example product body:
-{
-"sku": "ELEC-004",
-"name": "Wireless Keyboard",
-"category": "Electronics",
-"price": 599,
-"reorderLevel": 50,
-"brand": "Logitech",
-"description": "Wireless keyboard",
-"unit": "Piece"
-}
-
-Example stock-in body:
-{
-"productId": "PRODUCT_OBJECT_ID",
-"warehouseId": "WAREHOUSE_OBJECT_ID",
-"qty": 50,
-"user": "Admin",
-"note": "Opening stock"
-}
-
-## Development
-
-- `npm run lint` / `npm run lint:fix` — ESLint
-- `npm run format` / `npm run format:check` — Prettier
-- CI runs lint and format checks on every PR. See [CONTRIBUTING.md](CONTRIBUTING.md) for branching and PR rules.
+Stock-changing calls answer `{ movement(s), stock: [{ productId, warehouseId, quantity }] }` with the new quantities.
+Order totals and prices are always calculated on the server from the product table. Confirming a sales order deducts
+stock from the first warehouse (A-Z) all-or-nothing; cancel / return / delete put it back; receiving a purchase order adds it once.

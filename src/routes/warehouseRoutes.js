@@ -1,8 +1,11 @@
 import { Router } from 'express';
 import { getWarehouses, getWarehouse, createWarehouse, addLocation } from '../controllers/warehouseController.js';
+import { authenticate, requireRole } from '../middleware/auth.js';
 const router = Router();
+const managers = requireRole('Admin', 'Warehouse Manager');
+router.use(authenticate);
 router.get('/', getWarehouses);
 router.get('/:id', getWarehouse);
-router.post('/', createWarehouse);
-router.post('/:id/locations', addLocation);
+router.post('/', managers, createWarehouse);
+router.post('/:id/locations', managers, addLocation);
 export default router;
